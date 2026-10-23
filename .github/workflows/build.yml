@@ -1,4 +1,4 @@
-name: Build Canva Lite iPad iOS 15
+name: Build Canva Lite iPad iOS 15 Fix
 
 on:
   push:
@@ -12,7 +12,7 @@ jobs:
         run: |
           mkdir -p Payload/CanvaLite.app
 
-          # 1. Buat Icon Gradasi Biru-Ungu khas Canva (Murni Python, Anti Gagal)
+          # 1. Buat Icon Gradasi Biru-Ungu khas Canva
           python3 - << 'EOF'
           import struct, zlib
 
@@ -25,7 +25,6 @@ jobs:
                       r = int(0 * (1.0 - t) + 125 * t)
                       g = int(196 * (1.0 - t) + 42 * t)
                       b = int(204 * (1.0 - t) + 232 * t)
-                      # Lingkaran putih tipis di tengah sebagai aksen huruf C
                       dx = x - width / 2.0
                       dy = y - height / 2.0
                       dist = (dx*dx + dy*dy) ** 0.5
@@ -48,7 +47,7 @@ jobs:
           make_png("Payload/CanvaLite.app/AppIcon83.5x83.5@2x~ipad.png", 167, 167)
           EOF
 
-          # 2. Buat App.swift khusus Optimasi Ketik & Drag-and-Drop Canva
+          # 2. Buat App.swift dengan Polyfill ES2023 iOS 15 + Anti White Screen
           cat << 'EOF' > App.swift
           import UIKit
           import WebKit
@@ -61,7 +60,7 @@ jobs:
               func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
                   cleanVolatileCache()
 
-                  purgeTimer = Timer.scheduledTimer(withTimeInterval: 60.0, repeats: true) { _ in
+                  purgeTimer = Timer.scheduledTimer(withTimeInterval: 90.0, repeats: true) { _ in
                       self.cleanVolatileCache()
                   }
 
@@ -93,7 +92,7 @@ jobs:
               }
           }
 
-          class CanvaViewController: UIViewController, WKNavigationDelegate, WKUIDelegate {
+          class CanvaViewController: UIViewController, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
               var webView: WKWebView!
               var popupWebView: WKWebView?
               var closePopupBtn: UIButton?
@@ -103,63 +102,115 @@ jobs:
                   let bg = UIColor(red: 0.09, green: 0.09, blue: 0.11, alpha: 1.0)
                   view.backgroundColor = bg
 
-                  URLCache.shared.memoryCapacity = 4 * 1024 * 1024
-                  URLCache.shared.diskCapacity = 16 * 1024 * 1024
+                  URLCache.shared.memoryCapacity = 8 * 1024 * 1024
+                  URLCache.shared.diskCapacity = 32 * 1024 * 1024
 
                   let contentController = WKUserContentController()
+                  contentController.add(self, name: "closeWindow")
 
-                  let canvaTurboJS = """
+                  // A. POLYFILL ES2023 UNTUK iOS 15 (Mencegah Blank Putih setelah Login)
+                  let ios15PolyfillJS = """
                   (function() {
-                      // 1. Kunci DPI ke 1.0x agar render kanvas saat drag-and-drop 75% lebih ringan
-                      try {
-                          Object.defineProperty(window, 'devicePixelRatio', { get: () => 1.0 });
-                      } catch (e) {}
-
-                      // 2. Matikan efek blur UI, bayangan berat, dan delay sentuhan saat drag-and-drop
-                      const style = document.createElement('style');
-                      style.innerHTML = `
-                          * {
-                              backdrop-filter: none !important;
-                              -webkit-backdrop-filter: none !important;
-                              -webkit-tap-highlight-color: transparent !important;
-                          }
-                          canvas, [contenteditable="true"], [role="textbox"] {
-                              touch-action: none !important;
-                          }
-                      `;
-                      document.documentElement.appendChild(style);
-
-                      // 3. Matikan Spellcheck & Autocorrect iOS pada kotak teks Canva agar mengetik tidak lag
-                      function optimizeInputs(root) {
-                          const els = (root || document).querySelectorAll('[contenteditable="true"], [role="textbox"], input, textarea');
-                          for (let i = 0; i < els.length; i++) {
-                              const el = els[i];
-                              if (!el.dataset.fastType) {
-                                  el.dataset.fastType = '1';
-                                  el.setAttribute('spellcheck', 'false');
-                                  el.setAttribute('autocorrect', 'off');
-                                  el.setAttribute('autocapitalize', 'off');
-                                  el.setAttribute('autocomplete', 'off');
+                      if (!Object.hasOwn) {
+                          Object.hasOwn = function(obj, prop) {
+                              return Object.prototype.hasOwnProperty.call(obj, prop);
+                          };
+                      }
+                      if (!Array.prototype.findLast) {
+                          Array.prototype.findLast = function(cb, thisArg) {
+                              for (let i = this.length - 1; i >= 0; i--) {
+                                  if (cb.call(thisArg, this[i], i, this)) return this[i];
                               }
-                          }
+                              return undefined;
+                          };
+                      }
+                      if (!Array.prototype.findLastIndex) {
+                          Array.prototype.findLastIndex = function(cb, thisArg) {
+                              for (let i = this.length - 1; i >= 0; i--) {
+                                  if (cb.call(thisArg, this[i], i, this)) return i;
+                              }
+                              return -1;
+                          };
+                      }
+                      if (!Array.prototype.toSorted) {
+                          Array.prototype.toSorted = function(compareFn) {
+                              return Array.prototype.slice.call(this).sort(compareFn);
+                          };
+                      }
+                      if (!Array.prototype.toReversed) {
+                          Array.prototype.toReversed = function() {
+                              return Array.prototype.slice.call(this).reverse();
+                          };
+                      }
+                      if (!Array.prototype.toSpliced) {
+                          Array.prototype.toSpliced = function(start, deleteCount) {
+                              const copy = Array.prototype.slice.call(this);
+                              const args = Array.prototype.slice.call(arguments);
+                              Array.prototype.splice.apply(copy, args);
+                              return copy;
+                          };
+                      }
+                      if (!Array.prototype.with) {
+                          Array.prototype.with = function(index, value) {
+                              const copy = Array.prototype.slice.call(this);
+                              const len = copy.length;
+                              const actualIndex = index < 0 ? len + index : index;
+                              if (actualIndex >= 0 && actualIndex < len) copy[actualIndex] = value;
+                              return copy;
+                          };
+                      }
+                      if (typeof window.structuredClone !== 'function') {
+                          window.structuredClone = function(val) {
+                              if (val === undefined) return undefined;
+                              return JSON.parse(JSON.stringify(val));
+                          };
+                      }
+                      if (typeof window.crypto !== 'undefined' && !window.crypto.randomUUID) {
+                          window.crypto.randomUUID = function() {
+                              return '10000000-1000-4000-8000-100000000000'.replace(/[018]/g, function(c) {
+                                  return (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16);
+                              });
+                          };
+                      }
+                      const origClose = window.close;
+                      window.close = function() {
+                          try { window.webkit.messageHandlers.closeWindow.postMessage("close"); } catch(e) {}
+                          if (origClose) origClose.call(window);
+                      };
+                  })();
+                  """
+                  let polyfillScript = WKUserScript(source: ios15PolyfillJS, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+                  contentController.addUserScript(polyfillScript)
+
+                  // B. OPTIMASI KETIK & DRAG-AND-DROP (Dijalankan di .atDocumentEnd agar React tidak crash)
+                  let canvaSmoothJS = """
+                  (function() {
+                      if (document.head && !document.getElementById('canva-lite-style')) {
+                          const style = document.createElement('style');
+                          style.id = 'canva-lite-style';
+                          style.textContent = `
+                              * {
+                                  backdrop-filter: none !important;
+                                  -webkit-backdrop-filter: none !important;
+                                  -webkit-tap-highlight-color: transparent !important;
+                              }
+                          `;
+                          document.head.appendChild(style);
                       }
 
                       document.addEventListener('focusin', function(e) {
-                          if (e.target && e.target.setAttribute) {
-                              e.target.setAttribute('spellcheck', 'false');
-                              e.target.setAttribute('autocorrect', 'off');
-                              e.target.setAttribute('autocapitalize', 'off');
-                              e.target.setAttribute('autocomplete', 'off');
+                          const t = e.target;
+                          if (t && t.setAttribute) {
+                              t.setAttribute('spellcheck', 'false');
+                              t.setAttribute('autocorrect', 'off');
+                              t.setAttribute('autocapitalize', 'off');
+                              t.setAttribute('autocomplete', 'off');
                           }
                       }, true);
-
-                      setInterval(function() {
-                          optimizeInputs(document);
-                      }, 2000);
                   })();
                   """
-                  let userScript = WKUserScript(source: canvaTurboJS, injectionTime: .atDocumentStart, forMainFrameOnly: false)
-                  contentController.addUserScript(userScript)
+                  let smoothScript = WKUserScript(source: canvaSmoothJS, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
+                  contentController.addUserScript(smoothScript)
 
                   let config = WKWebViewConfiguration()
                   config.userContentController = contentController
@@ -168,6 +219,7 @@ jobs:
                   config.allowsInlineMediaPlayback = true
                   config.suppressesIncrementalRendering = false
                   config.dataDetectorTypes = []
+                  config.preferences.javaScriptCanOpenWindowsAutomatically = true
 
                   if #available(iOS 14.0, *) {
                       config.defaultWebpagePreferences.allowsContentJavaScript = true
@@ -177,22 +229,19 @@ jobs:
                   webView = WKWebView(frame: .zero, configuration: config)
                   webView.navigationDelegate = self
                   webView.uiDelegate = self
-                  webView.allowsBackForwardNavigationGestures = false
+                  webView.allowsBackForwardNavigationGestures = true
                   webView.allowsLinkPreview = false
                   webView.isOpaque = true
                   webView.backgroundColor = bg
 
-                  // Optimasi ScrollView Native supaya Drag-and-Drop langsung responsif (0ms delay)
                   webView.scrollView.backgroundColor = bg
                   webView.scrollView.bounces = false
-                  webView.scrollView.alwaysBounceVertical = false
-                  webView.scrollView.alwaysBounceHorizontal = false
                   webView.scrollView.delaysContentTouches = false
                   webView.scrollView.canCancelContentTouches = false
                   webView.scrollView.keyboardDismissMode = .interactive
 
-                  // Gunakan User-Agent Safari iPadOS Desktop-Class agar editor penuh Canva terbuka tanpa paksaan pindah ke App Store
-                  webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.6 Safari/605.1.15"
+                  // Gunakan User-Agent Safari 17 Desktop-Class agar sistem keamanan Canva mengizinkan akses penuh
+                  webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
 
                   view.addSubview(webView)
                   webView.translatesAutoresizingMaskIntoConstraints = false
@@ -203,12 +252,47 @@ jobs:
                       webView.trailingAnchor.constraint(equalTo: view.trailingAnchor)
                   ])
 
+                  // Tombol kecil Reload di pojok kanan atas jika koneksi nyangkut
+                  let reloadBtn = UIButton(type: .system)
+                  reloadBtn.setTitle("↻", for: .normal)
+                  reloadBtn.titleLabel?.font = UIFont.boldSystemFont(ofSize: 18)
+                  reloadBtn.setTitleColor(.white, for: .normal)
+                  reloadBtn.backgroundColor = UIColor.black.withAlphaComponent(0.45)
+                  reloadBtn.layer.cornerRadius = 16
+                  reloadBtn.translatesAutoresizingMaskIntoConstraints = false
+                  reloadBtn.addTarget(self, action: #selector(reloadMain), for: .touchUpInside)
+                  view.addSubview(reloadBtn)
+                  NSLayoutConstraint.activate([
+                      reloadBtn.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
+                      reloadBtn.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
+                      reloadBtn.widthAnchor.constraint(equalToConstant: 32),
+                      reloadBtn.heightAnchor.constraint(equalToConstant: 32)
+                  ])
+
                   if let url = URL(string: "https://www.canva.com/") {
                       webView.load(URLRequest(url: url))
                   }
               }
 
-              // Blokir redirect paksa ke skema canva:// atau App Store
+              @objc func reloadMain() {
+                  if popupWebView != nil {
+                      closePopup()
+                  }
+                  if webView.url == nil || webView.url?.absoluteString == "about:blank" {
+                      if let url = URL(string: "https://www.canva.com/") {
+                          webView.load(URLRequest(url: url))
+                      }
+                  } else {
+                      webView.reload()
+                  }
+              }
+
+              func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+                  if message.name == "closeWindow" {
+                      closePopup()
+                  }
+              }
+
               func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
                   if let url = navigationAction.request.url, let scheme = url.scheme?.lowercased() {
                       if scheme == "canva" || scheme == "itms-apps" || scheme == "itms-appss" {
@@ -219,16 +303,26 @@ jobs:
                           decisionHandler(.cancel)
                           return
                       }
+                      // Jika popup membuka file desain Canva (bukan halaman login/oauth), pindahkan ke layar utama
+                      if webView == popupWebView, let host = url.host?.lowercased(), host.contains("canva.com") {
+                          let path = url.path.lowercased()
+                          if path.hasPrefix("/design/") || path == "/" {
+                              self.webView.load(URLRequest(url: url))
+                              closePopup()
+                              decisionHandler(.cancel)
+                              return
+                          }
+                      }
                   }
                   decisionHandler(.allow)
               }
 
-              // Buka desain Canva di tab yang sama (hemat RAM), tapi izinkan popup khusus untuk Login Google/Apple
+              // Tangani semua window.open dengan benar tanpa menimpa layar utama dengan about:blank
               func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
                   if let url = navigationAction.request.url {
-                      let urlStr = url.absoluteString.lowercased()
-                      if !urlStr.contains("accounts.google.com") && !urlStr.contains("appleid.apple.com") && !urlStr.contains("facebook.com") {
-                          webView.load(navigationAction.request)
+                      let urlStr = url.absoluteString
+                      if urlStr.hasPrefix("https://www.canva.com/design/") {
+                          self.webView.load(URLRequest(url: url))
                           return nil
                       }
                   }
@@ -242,11 +336,11 @@ jobs:
                   view.addSubview(popup)
 
                   let btn = UIButton(type: .system)
-                  btn.setTitle("X Tutup", for: .normal)
+                  btn.setTitle("✕ Tutup Popup", for: .normal)
                   btn.setTitleColor(.white, for: .normal)
                   btn.backgroundColor = UIColor.black.withAlphaComponent(0.75)
                   btn.layer.cornerRadius = 8
-                  btn.frame = CGRect(x: 16, y: 40, width: 90, height: 36)
+                  btn.frame = CGRect(x: 16, y: 44, width: 120, height: 36)
                   btn.addTarget(self, action: #selector(closePopup), for: .touchUpInside)
                   view.addSubview(btn)
 
@@ -298,9 +392,9 @@ jobs:
               <key>CFBundlePackageType</key>
               <string>APPL</string>
               <key>CFBundleShortVersionString</key>
-              <string>1.0</string>
+              <string>1.1</string>
               <key>CFBundleVersion</key>
-              <string>1</string>
+              <string>2</string>
               <key>CFBundleIcons</key>
               <dict>
                   <key>CFBundlePrimaryIcon</key>
