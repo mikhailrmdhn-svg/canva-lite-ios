@@ -1,0 +1,387 @@
+name: Build Canva Lite iPad iOS 15
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: Generate Icon & Compile CanvaLite IPA
+        run: |
+          mkdir -p Payload/CanvaLite.app
+
+          # 1. Buat Icon Gradasi Biru-Ungu khas Canva (Murni Python, Anti Gagal)
+          python3 - << 'EOF'
+          import struct, zlib
+
+          def make_png(path, width, height):
+              raw = bytearray()
+              for y in range(height):
+                  raw.append(0)
+                  for x in range(width):
+                      t = (x + y) / float(width + height)
+                      r = int(0 * (1.0 - t) + 125 * t)
+                      g = int(196 * (1.0 - t) + 42 * t)
+                      b = int(204 * (1.0 - t) + 232 * t)
+                      # Lingkaran putih tipis di tengah sebagai aksen huruf C
+                      dx = x - width / 2.0
+                      dy = y - height / 2.0
+                      dist = (dx*dx + dy*dy) ** 0.5
+                      if width * 0.22 < dist < width * 0.30 and dx < width * 0.12:
+                          r, g, b = 255, 255, 255
+                      raw.extend((r, g, b))
+
+              def chunk(tag, data):
+                  return struct.pack("!I", len(data)) + tag + data + struct.pack("!I", zlib.crc32(tag + data) & 0xffffffff)
+
+              png = b"\x89PNG\r\n\x1a\n"
+              png += chunk(b"IHDR", struct.pack("!IIBBBBB", width, height, 8, 2, 0, 0, 0))
+              png += chunk(b"IDAT", zlib.compress(bytes(raw), 9))
+              png += chunk(b"IEND", b"")
+              with open(path, "wb") as f:
+                  f.write(png)
+
+          make_png("Payload/CanvaLite.app/AppIcon60x60@2x.png", 120, 120)
+          make_png("Payload/CanvaLite.app/AppIcon76x76@2x~ipad.png", 152, 152)
+          make_png("Payload/CanvaLite.app/AppIcon83.5x83.5@2x~ipad.png", 167, 167)
+          EOF
+
+          # 2. Buat App.swift khusus Optimasi Ketik & Drag-and-Drop Canva
+          cat << 'EOF' > App.swift
+          import UIKit
+          import WebKit
+
+          @main
+          class AppDelegate: UIResponder, UIApplicationDelegate {
+              var window: UIWindow?
+              var purgeTimer: Timer?
+
+              func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
+                  cleanVolatileCache()
+
+                  purgeTimer = Timer.scheduledTimer(withTimeInterval: 60.0, repeats: true) { _ in
+                      self.cleanVolatileCache()
+                  }
+
+                  window = UIWindow(frame: UIScreen.main.bounds)
+                  window?.rootViewController = CanvaViewController()
+                  window?.makeKeyAndVisible()
+                  return true
+              }
+
+              func applicationDidReceiveMemoryWarning(_ application: UIApplication) {
+                  cleanVolatileCache()
+              }
+
+              func applicationDidEnterBackground(_ application: UIApplication) {
+                  cleanVolatileCache()
+              }
+
+              func cleanVolatileCache() {
+                  let volatileTypes: Set<String> = [
+                      WKWebsiteDataTypeMemoryCache,
+                      WKWebsiteDataTypeDiskCache,
+                      WKWebsiteDataTypeOfflineWebApplicationCache
+                  ]
+                  WKWebsiteDataStore.default().removeData(
+                      ofTypes: volatileTypes,
+                      modifiedSince: Date(timeIntervalSince1970: 0)
+                  ) {}
+                  URLCache.shared.removeAllCachedResponses()
+              }
+          }
+
+          class CanvaViewController: UIViewController, WKNavigationDelegate, WKUIDelegate {
+              var webView: WKWebView!
+              var popupWebView: WKWebView?
+              var closePopupBtn: UIButton?
+
+              override func viewDidLoad() {
+                  super.viewDidLoad()
+                  let bg = UIColor(red: 0.09, green: 0.09, blue: 0.11, alpha: 1.0)
+                  view.backgroundColor = bg
+
+                  URLCache.shared.memoryCapacity = 4 * 1024 * 1024
+                  URLCache.shared.diskCapacity = 16 * 1024 * 1024
+
+                  let contentController = WKUserContentController()
+
+                  let canvaTurboJS = """
+                  (function() {
+                      // 1. Kunci DPI ke 1.0x agar render kanvas saat drag-and-drop 75% lebih ringan
+                      try {
+                          Object.defineProperty(window, 'devicePixelRatio', { get: () => 1.0 });
+                      } catch (e) {}
+
+                      // 2. Matikan efek blur UI, bayangan berat, dan delay sentuhan saat drag-and-drop
+                      const style = document.createElement('style');
+                      style.innerHTML = `
+                          * {
+                              backdrop-filter: none !important;
+                              -webkit-backdrop-filter: none !important;
+                              -webkit-tap-highlight-color: transparent !important;
+                          }
+                          canvas, [contenteditable="true"], [role="textbox"] {
+                              touch-action: none !important;
+                          }
+                      `;
+                      document.documentElement.appendChild(style);
+
+                      // 3. Matikan Spellcheck & Autocorrect iOS pada kotak teks Canva agar mengetik tidak lag
+                      function optimizeInputs(root) {
+                          const els = (root || document).querySelectorAll('[contenteditable="true"], [role="textbox"], input, textarea');
+                          for (let i = 0; i < els.length; i++) {
+                              const el = els[i];
+                              if (!el.dataset.fastType) {
+                                  el.dataset.fastType = '1';
+                                  el.setAttribute('spellcheck', 'false');
+                                  el.setAttribute('autocorrect', 'off');
+                                  el.setAttribute('autocapitalize', 'off');
+                                  el.setAttribute('autocomplete', 'off');
+                              }
+                          }
+                      }
+
+                      document.addEventListener('focusin', function(e) {
+                          if (e.target && e.target.setAttribute) {
+                              e.target.setAttribute('spellcheck', 'false');
+                              e.target.setAttribute('autocorrect', 'off');
+                              e.target.setAttribute('autocapitalize', 'off');
+                              e.target.setAttribute('autocomplete', 'off');
+                          }
+                      }, true);
+
+                      setInterval(function() {
+                          optimizeInputs(document);
+                      }, 2000);
+                  })();
+                  """
+                  let userScript = WKUserScript(source: canvaTurboJS, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+                  contentController.addUserScript(userScript)
+
+                  let config = WKWebViewConfiguration()
+                  config.userContentController = contentController
+                  config.websiteDataStore = WKWebsiteDataStore.default()
+                  config.processPool = WKProcessPool()
+                  config.allowsInlineMediaPlayback = true
+                  config.suppressesIncrementalRendering = false
+                  config.dataDetectorTypes = []
+
+                  if #available(iOS 14.0, *) {
+                      config.defaultWebpagePreferences.allowsContentJavaScript = true
+                      config.defaultWebpagePreferences.preferredContentMode = .desktop
+                  }
+
+                  webView = WKWebView(frame: .zero, configuration: config)
+                  webView.navigationDelegate = self
+                  webView.uiDelegate = self
+                  webView.allowsBackForwardNavigationGestures = false
+                  webView.allowsLinkPreview = false
+                  webView.isOpaque = true
+                  webView.backgroundColor = bg
+
+                  // Optimasi ScrollView Native supaya Drag-and-Drop langsung responsif (0ms delay)
+                  webView.scrollView.backgroundColor = bg
+                  webView.scrollView.bounces = false
+                  webView.scrollView.alwaysBounceVertical = false
+                  webView.scrollView.alwaysBounceHorizontal = false
+                  webView.scrollView.delaysContentTouches = false
+                  webView.scrollView.canCancelContentTouches = false
+                  webView.scrollView.keyboardDismissMode = .interactive
+
+                  // Gunakan User-Agent Safari iPadOS Desktop-Class agar editor penuh Canva terbuka tanpa paksaan pindah ke App Store
+                  webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.6 Safari/605.1.15"
+
+                  view.addSubview(webView)
+                  webView.translatesAutoresizingMaskIntoConstraints = false
+                  NSLayoutConstraint.activate([
+                      webView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+                      webView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+                      webView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+                      webView.trailingAnchor.constraint(equalTo: view.trailingAnchor)
+                  ])
+
+                  if let url = URL(string: "https://www.canva.com/") {
+                      webView.load(URLRequest(url: url))
+                  }
+              }
+
+              // Blokir redirect paksa ke skema canva:// atau App Store
+              func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+                  if let url = navigationAction.request.url, let scheme = url.scheme?.lowercased() {
+                      if scheme == "canva" || scheme == "itms-apps" || scheme == "itms-appss" {
+                          decisionHandler(.cancel)
+                          return
+                      }
+                      if let host = url.host?.lowercased(), host.contains("apps.apple.com") || host.contains("itunes.apple.com") {
+                          decisionHandler(.cancel)
+                          return
+                      }
+                  }
+                  decisionHandler(.allow)
+              }
+
+              // Buka desain Canva di tab yang sama (hemat RAM), tapi izinkan popup khusus untuk Login Google/Apple
+              func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+                  if let url = navigationAction.request.url {
+                      let urlStr = url.absoluteString.lowercased()
+                      if !urlStr.contains("accounts.google.com") && !urlStr.contains("appleid.apple.com") && !urlStr.contains("facebook.com") {
+                          webView.load(navigationAction.request)
+                          return nil
+                      }
+                  }
+
+                  closePopup()
+                  let popup = WKWebView(frame: view.bounds, configuration: configuration)
+                  popup.navigationDelegate = self
+                  popup.uiDelegate = self
+                  popup.customUserAgent = webView.customUserAgent
+                  popup.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+                  view.addSubview(popup)
+
+                  let btn = UIButton(type: .system)
+                  btn.setTitle("X Tutup", for: .normal)
+                  btn.setTitleColor(.white, for: .normal)
+                  btn.backgroundColor = UIColor.black.withAlphaComponent(0.75)
+                  btn.layer.cornerRadius = 8
+                  btn.frame = CGRect(x: 16, y: 40, width: 90, height: 36)
+                  btn.addTarget(self, action: #selector(closePopup), for: .touchUpInside)
+                  view.addSubview(btn)
+
+                  popupWebView = popup
+                  closePopupBtn = btn
+                  return popup
+              }
+
+              @objc func closePopup() {
+                  popupWebView?.removeFromSuperview()
+                  closePopupBtn?.removeFromSuperview()
+                  popupWebView = nil
+                  closePopupBtn = nil
+              }
+
+              func webViewDidClose(_ webView: WKWebView) {
+                  if webView == popupWebView {
+                      closePopup()
+                  }
+              }
+
+              @available(iOS 15.0, *)
+              func webView(_ webView: WKWebView, requestMediaCapturePermissionFor origin: WKSecurityOrigin, initiatedByFrame frame: WKFrameInfo, type: WKMediaCaptureType, decisionHandler: @escaping (WKPermissionDecision) -> Void) {
+                  decisionHandler(.grant)
+              }
+
+              func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+                  webView.reload()
+              }
+          }
+          EOF
+
+          # 3. Buat Info.plist khusus iPad Air iOS 15
+          cat << 'EOF' > Payload/CanvaLite.app/Info.plist
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleDisplayName</key>
+              <string>Canva Lite</string>
+              <key>CFBundleExecutable</key>
+              <string>CanvaLite</string>
+              <key>CFBundleIdentifier</key>
+              <string>com.custom.canvalite.ipad</string>
+              <key>CFBundleInfoDictionaryVersion</key>
+              <string>6.0</string>
+              <key>CFBundleName</key>
+              <string>CanvaLite</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>1.0</string>
+              <key>CFBundleVersion</key>
+              <string>1</string>
+              <key>CFBundleIcons</key>
+              <dict>
+                  <key>CFBundlePrimaryIcon</key>
+                  <dict>
+                      <key>CFBundleIconFiles</key>
+                      <array>
+                          <string>AppIcon60x60</string>
+                      </array>
+                      <key>UIPrerenderedIcon</key>
+                      <true/>
+                  </dict>
+              </dict>
+              <key>CFBundleIcons~ipad</key>
+              <dict>
+                  <key>CFBundlePrimaryIcon</key>
+                  <dict>
+                      <key>CFBundleIconFiles</key>
+                      <array>
+                          <string>AppIcon76x76</string>
+                          <string>AppIcon83.5x83.5</string>
+                          <string>AppIcon60x60</string>
+                      </array>
+                      <key>UIPrerenderedIcon</key>
+                      <true/>
+                  </dict>
+              </dict>
+              <key>LSRequiresIPhoneOS</key>
+              <true/>
+              <key>MinimumOSVersion</key>
+              <string>15.0</string>
+              <key>NSCameraUsageDescription</key>
+              <string>Digunakan untuk mengambil foto langsung ke dalam kanvas desain Canva.</string>
+              <key>NSMicrophoneUsageDescription</key>
+              <string>Digunakan untuk merekam audio ke dalam desain Canva.</string>
+              <key>NSPhotoLibraryUsageDescription</key>
+              <string>Digunakan untuk mengunggah gambar dari galeri iPad ke Canva.</string>
+              <key>NSPhotoLibraryAddUsageDescription</key>
+              <string>Digunakan untuk menyimpan hasil desain Canva ke galeri iPad.</string>
+              <key>UIDeviceFamily</key>
+              <array>
+                  <integer>1</integer>
+                  <integer>2</integer>
+              </array>
+              <key>UILaunchScreen</key>
+              <dict/>
+              <key>UIRequiredDeviceCapabilities</key>
+              <array>
+                  <string>arm64</string>
+              </array>
+              <key>UIRequiresFullScreen</key>
+              <false/>
+              <key>UISupportedInterfaceOrientations</key>
+              <array>
+                  <string>UIInterfaceOrientationPortrait</string>
+                  <string>UIInterfaceOrientationLandscapeLeft</string>
+                  <string>UIInterfaceOrientationLandscapeRight</string>
+              </array>
+              <key>UISupportedInterfaceOrientations~ipad</key>
+              <array>
+                  <string>UIInterfaceOrientationPortrait</string>
+                  <string>UIInterfaceOrientationPortraitUpsideDown</string>
+                  <string>UIInterfaceOrientationLandscapeLeft</string>
+                  <string>UIInterfaceOrientationLandscapeRight</string>
+              </array>
+          </dict>
+          </plist>
+          EOF
+
+          # 4. Compile & Sign IPA
+          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+          xcrun --sdk iphoneos swiftc -parse-as-library App.swift \
+            -target arm64-apple-ios15.0 \
+            -sdk "$SDK_PATH" \
+            -framework UIKit -framework WebKit \
+            -Osize -o Payload/CanvaLite.app/CanvaLite
+
+          codesign --force --sign "-" --timestamp=none Payload/CanvaLite.app
+          zip -r CanvaLite-iPad-iOS15.ipa Payload
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CanvaLite-iPad-IPA
+          path: CanvaLite-iPad-iOS15.ipa
